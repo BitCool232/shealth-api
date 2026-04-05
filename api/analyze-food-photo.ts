@@ -15,7 +15,73 @@ import { checkRateLimit, getDeviceId } from "../lib/rate-limit";
 
 interface AnalyzeFoodPhotoBody {
   imageBase64: string;
-  userContext: string | null;
+  userGoal?: string;
+  calorieTarget?: number;
+  proteinTarget?: number;
+  plateDiameterCM?: number;
+  foodRegionsJSON?: string;
+  userContext?: string | null;
+}
+
+// Goal-based defaults (mirrors iOS UserProfile logic)
+function defaultCalorieTarget(goal: string): number {
+  switch (goal.toLowerCase()) {
+    case "bulking":
+    case "bulk":
+    case "gain":
+    case "mass":
+      return 3000;
+    case "cutting":
+    case "cut":
+    case "lose":
+    case "loss":
+      return 1800;
+    case "maintenance":
+    case "maintain":
+      return 2200;
+    default:
+      return 2200;
+  }
+}
+
+function defaultProteinTarget(goal: string): number {
+  switch (goal.toLowerCase()) {
+    case "bulking":
+    case "bulk":
+    case "gain":
+    case "mass":
+      return 180;
+    case "cutting":
+    case "cut":
+    case "lose":
+    case "loss":
+      return 150;
+    case "maintenance":
+    case "maintain":
+      return 140;
+    default:
+      return 140;
+  }
+}
+
+function buildFoodAnalysisPrompt(
+  userGoal: string,
+  calorieTarget: number,
+  proteinTarget: number,
+  plateDiameterCM?: number,
+  foodRegionsJSON?: string
+): string {
+  let prompt =
+    "You are SHealth's food analysis AI. Analyze this food photo and return a JSON object with each food item's name, estimated portion size in grams, calories, protein_g, carbs_g, fat_g, and an item_confidence of high/medium/low \u2014 plus a totals object and a calorie_range with low and high estimates. Only identify foods you can clearly see \u2014 never guess hidden ingredients like bacon or cheese unless visually confirmed. Use the plate as a scale reference assuming a standard 26.7cm dinner plate, and estimate portions relative to it. When portion size is uncertain, err 5-10% high on calories. Include a hidden_additions object estimating cooking oils or sauces with a brief note. ";
+
+  // LiDAR / AR depth data paragraph (optional)
+  if (plateDiameterCM && foodRegionsJSON) {
+    prompt += `AR depth data is available \u2014 the plate measures ${plateDiameterCM.toFixed(1)}cm in diameter and the following food regions were detected with estimated volumes: ${foodRegionsJSON}. Use these volumes as ground truth for portion sizing, converting to weight using density estimates (meat ~1.0 g/mL, vegetables ~0.6 g/mL, grains ~0.85 g/mL, starches ~0.9 g/mL). When volume data is present, default to high confidence. `;
+  }
+
+  prompt += `Finally include a health_profile_notes string with one actionable sentence about this meal relative to the user's goal of ${userGoal} and daily target of ${calorieTarget} kcal and ${proteinTarget}g protein. Return only valid JSON, no markdown or preamble.`;
+
+  return prompt;
 }
 
 export default async function handler(
@@ -57,35 +123,22 @@ export default async function handler(
       return;
     }
 
-    const contextNote = body.userContext ? ` User note: ${body.userContext}` : "";
+    // Resolve user profile values with defaults
+    const userGoal = body.userGoal || "maintenance";
+    const calorieTarget = body.calorieTarget || defaultCalorieTarget(userGoal);
+    const proteinTarget = body.proteinTarget || defaultProteinTarget(userGoal);
 
-    const prompt = `Analyze this food photo and estimate calories and macronutrients for each item visible.${contextNote}
-
-Respond ONLY with valid JSON (no markdown, no code fences):
-{
-  "foodItems": [
-    {
-      "name": "<food item>",
-      "estimatedCalories": <integer>,
-      "estimatedProtein": <double in grams>,
-      "estimatedCarbs": <double in grams>,
-      "estimatedFat": <double in grams>,
-      "portionSize": "<estimated portion>"
-    }
-  ],
-  "totalCalories": <integer>,
-  "totalProtein": <double>,
-  "totalCarbs": <double>,
-  "totalFat": <double>,
-  "confidence": "<high|medium|low>",
-  "hormoneNote": "<optional: how this meal affects testosterone/hormones, or null>"
-}
-
-Be realistic with portions visible in the photo. Include a hormone note if the meal has significant testosterone-relevant properties (zinc, healthy fats, phytoestrogens, etc.).`;
+    const prompt = buildFoodAnalysisPrompt(
+      userGoal,
+      calorieTarget,
+      proteinTarget,
+      body.plateDiameterCM,
+      body.foodRegionsJSON
+    );
 
     const response = await anthropic.messages.create({
       model: MODEL_FAST,
-      max_tokens: 1000,
+      max_tokens: 1500,
       messages: [
         {
           role: "user",
